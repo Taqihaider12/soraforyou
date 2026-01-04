@@ -27,7 +27,7 @@ export function VideoQueue({
   const pendingCount = videos.filter((v) => v.status === "pending").length;
   const completedCount = videos.filter((v) => v.status === "completed").length;
   const processingCount = videos.filter(
-    (v) => v.status === "fetching" || v.status === "processing" || v.status === "removing-watermark"
+    (v) => v.status === "fetching" || v.status === "processing"
   ).length;
 
   if (videos.length === 0) {

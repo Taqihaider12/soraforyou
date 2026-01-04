@@ -1,4 +1,4 @@
-export type VideoStatus = 'pending' | 'fetching' | 'processing' | 'removing-watermark' | 'completed' | 'error';
+export type VideoStatus = 'pending' | 'fetching' | 'processing' | 'completed' | 'error';
 
 export interface VideoItem {
   id: string;
@@ -8,7 +8,6 @@ export interface VideoItem {
   progressMessage?: string;
   thumbnailUrl?: string;
   downloadUrl?: string;
-  processedBlob?: Blob;
   fileName?: string;
   error?: string;
   resolution?: string;
