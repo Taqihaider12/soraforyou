@@ -10,6 +10,7 @@ interface VideoQueueProps {
   onClearAll: () => void;
   onProcessAll: () => void;
   onDownloadAll: () => void;
+  onDownloadSingle: (video: VideoItem) => void;
   isProcessing: boolean;
 }
 
@@ -20,12 +21,13 @@ export function VideoQueue({
   onClearAll,
   onProcessAll,
   onDownloadAll,
+  onDownloadSingle,
   isProcessing,
 }: VideoQueueProps) {
   const pendingCount = videos.filter((v) => v.status === "pending").length;
   const completedCount = videos.filter((v) => v.status === "completed").length;
   const processingCount = videos.filter(
-    (v) => v.status === "fetching" || v.status === "processing"
+    (v) => v.status === "fetching" || v.status === "processing" || v.status === "removing-watermark"
   ).length;
 
   if (videos.length === 0) {
@@ -116,6 +118,7 @@ export function VideoQueue({
             video={video}
             onRemove={onRemove}
             onRetry={onRetry}
+            onDownload={onDownloadSingle}
           />
         ))}
       </div>

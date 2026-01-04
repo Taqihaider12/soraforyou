@@ -14,6 +14,7 @@ const Index = () => {
     processAll,
     retryVideo,
     downloadAll,
+    downloadSingle,
   } = useVideoProcessor();
 
   return (
@@ -31,6 +32,7 @@ const Index = () => {
             onClearAll={clearAll}
             onProcessAll={processAll}
             onDownloadAll={downloadAll}
+            onDownloadSingle={downloadSingle}
             isProcessing={isProcessing}
           />
         </main>

@@ -9,7 +9,8 @@ import {
   Clock, 
   Trash2,
   Film,
-  ExternalLink
+  ExternalLink,
+  Wand2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +18,7 @@ interface VideoCardProps {
   video: VideoItem;
   onRemove: (id: string) => void;
   onRetry: (id: string) => void;
+  onDownload: (video: VideoItem) => void;
 }
 
 const statusConfig = {
@@ -34,9 +36,15 @@ const statusConfig = {
   },
   processing: {
     icon: Loader2,
-    label: "Removing watermark...",
+    label: "Processing...",
     color: "text-primary",
     bgColor: "bg-primary/10",
+  },
+  "removing-watermark": {
+    icon: Wand2,
+    label: "Removing watermark...",
+    color: "text-accent",
+    bgColor: "bg-accent/10",
   },
   completed: {
     icon: CheckCircle2,
@@ -52,10 +60,10 @@ const statusConfig = {
   },
 };
 
-export function VideoCard({ video, onRemove, onRetry }: VideoCardProps) {
+export function VideoCard({ video, onRemove, onRetry, onDownload }: VideoCardProps) {
   const config = statusConfig[video.status];
   const StatusIcon = config.icon;
-  const isLoading = video.status === "fetching" || video.status === "processing";
+  const isLoading = video.status === "fetching" || video.status === "processing" || video.status === "removing-watermark";
 
   const extractVideoId = (url: string) => {
     const match = url.match(/s_([a-f0-9]+)/);
@@ -101,10 +109,10 @@ export function VideoCard({ video, onRemove, onRetry }: VideoCardProps) {
           
           <div className={cn("inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium mb-2", config.bgColor, config.color)}>
             <StatusIcon className={cn("w-3 h-3", isLoading && "animate-spin")} />
-            <span>{config.label}</span>
+            <span>{video.progressMessage || config.label}</span>
           </div>
 
-          {(video.status === "fetching" || video.status === "processing") && (
+          {isLoading && (
             <div className="mt-2">
               <Progress value={video.progress} className="h-1.5" />
               <span className="text-xs text-muted-foreground mt-1 block">
@@ -120,16 +128,14 @@ export function VideoCard({ video, onRemove, onRetry }: VideoCardProps) {
 
         {/* Actions */}
         <div className="flex items-center gap-2 shrink-0">
-          {video.status === "completed" && video.downloadUrl && (
+          {video.status === "completed" && (
             <Button 
               variant="success" 
               size="sm"
-              asChild
+              onClick={() => onDownload(video)}
             >
-              <a href={video.downloadUrl} download={video.fileName}>
-                <Download className="w-4 h-4" />
-                Download
-              </a>
+              <Download className="w-4 h-4" />
+              Download
             </Button>
           )}
           

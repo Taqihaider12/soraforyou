@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { VideoItem, VideoStatus } from "@/types/video";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { removeWatermark, downloadProcessedVideo, ProcessingProgress } from "@/lib/videoProcessor";
 
 export function useVideoProcessor() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
@@ -37,47 +38,92 @@ export function useVideoProcessor() {
   }, []);
 
   const processVideo = async (video: VideoItem) => {
-    // Update to fetching state
-    updateVideo(video.id, { status: "fetching", progress: 10 });
+    // Step 1: Fetch video info from edge function
+    updateVideo(video.id, { 
+      status: "fetching", 
+      progress: 5,
+      progressMessage: "Fetching video info..." 
+    });
 
     try {
-      // Call edge function to fetch video info
-      updateVideo(video.id, { progress: 30 });
-      
       const { data, error } = await supabase.functions.invoke('process-sora-video', {
         body: { url: video.originalUrl }
       });
 
       if (error) {
-        throw new Error(error.message || 'Failed to process video');
+        throw new Error(error.message || 'Failed to fetch video info');
       }
-
-      updateVideo(video.id, { status: "processing", progress: 50 });
       
       if (!data.success) {
-        throw new Error(data.error || 'Failed to extract video');
+        throw new Error(data.error || 'Failed to extract video URL');
       }
 
-      updateVideo(video.id, { progress: 70 });
+      updateVideo(video.id, { 
+        status: "processing", 
+        progress: 15,
+        progressMessage: "Video URL extracted",
+        thumbnailUrl: data.thumbnail,
+        resolution: data.resolution,
+      });
 
-      // Small delay for UX
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      updateVideo(video.id, { progress: 90 });
+      // Step 2: Process with FFmpeg to remove watermark
+      updateVideo(video.id, { 
+        status: "removing-watermark", 
+        progress: 20,
+        progressMessage: "Loading video processor..." 
+      });
 
-      // Complete with actual download URL from edge function
+      const fileName = data.fileName || `sora_${data.videoId}_no_watermark.mp4`;
+
+      const processedBlob = await removeWatermark(
+        data.downloadUrl,
+        (progressInfo: ProcessingProgress) => {
+          // Map FFmpeg progress to overall progress (20-95%)
+          let overallProgress = 20;
+          switch (progressInfo.stage) {
+            case 'loading':
+              overallProgress = 20 + (progressInfo.progress * 0.1);
+              break;
+            case 'downloading':
+              overallProgress = 30 + (progressInfo.progress * 0.2);
+              break;
+            case 'processing':
+            case 'encoding':
+              overallProgress = 50 + (progressInfo.progress * 0.45);
+              break;
+            case 'complete':
+              overallProgress = 95;
+              break;
+          }
+          
+          updateVideo(video.id, { 
+            progress: Math.round(overallProgress),
+            progressMessage: progressInfo.message 
+          });
+        }
+      );
+
+      // Step 3: Complete - create blob URL for download
+      const blobUrl = URL.createObjectURL(processedBlob);
+      
       updateVideo(video.id, {
         status: "completed",
         progress: 100,
-        fileName: data.fileName || `sora_${data.videoId}_no_watermark.mp4`,
-        resolution: data.resolution || "1080p",
-        downloadUrl: data.downloadUrl,
-        thumbnailUrl: data.thumbnail,
+        progressMessage: "Watermark removed!",
+        fileName,
+        downloadUrl: blobUrl,
+        processedBlob,
       });
+
+      toast.success(`Video processed: ${fileName}`);
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to process video';
+      console.error('Video processing error:', error);
       updateVideo(video.id, {
         status: "error",
         error: errorMessage,
+        progressMessage: undefined,
       });
     }
   };
@@ -91,9 +137,9 @@ export function useVideoProcessor() {
     }
 
     setIsProcessing(true);
-    toast.info(`Processing ${pendingVideos.length} video${pendingVideos.length !== 1 ? "s" : ""}...`);
+    toast.info(`Processing ${pendingVideos.length} video${pendingVideos.length !== 1 ? "s" : ""}... This may take a few minutes.`);
 
-    // Process videos sequentially to avoid overwhelming the system
+    // Process videos sequentially to avoid memory issues
     for (const video of pendingVideos) {
       await processVideo(video);
     }
@@ -106,34 +152,42 @@ export function useVideoProcessor() {
     const video = videos.find((v) => v.id === id);
     if (!video) return;
 
-    updateVideo(id, { status: "pending", progress: 0, error: undefined });
+    updateVideo(id, { status: "pending", progress: 0, error: undefined, progressMessage: undefined });
     setIsProcessing(true);
     await processVideo({ ...video, status: "pending", progress: 0 });
     setIsProcessing(false);
   }, [videos, updateVideo]);
 
+  const downloadSingle = useCallback((video: VideoItem) => {
+    if (video.processedBlob) {
+      downloadProcessedVideo(video.processedBlob, video.fileName || 'sora_video.mp4');
+    } else if (video.downloadUrl) {
+      const link = document.createElement('a');
+      link.href = video.downloadUrl;
+      link.download = video.fileName || 'sora_video.mp4';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  }, []);
+
   const downloadAll = useCallback(() => {
-    const completedVideos = videos.filter((v) => v.status === "completed" && v.downloadUrl);
+    const completedVideos = videos.filter((v) => v.status === "completed" && (v.processedBlob || v.downloadUrl));
     
     if (completedVideos.length === 0) {
       toast.info("No completed videos to download");
       return;
     }
 
-    // Trigger downloads
+    // Download sequentially with delay
     completedVideos.forEach((video, index) => {
       setTimeout(() => {
-        const link = document.createElement("a");
-        link.href = video.downloadUrl!;
-        link.download = video.fileName || `sora_video_${index + 1}.mp4`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }, index * 500);
+        downloadSingle(video);
+      }, index * 1000);
     });
 
     toast.success(`Downloading ${completedVideos.length} video${completedVideos.length !== 1 ? "s" : ""}...`);
-  }, [videos]);
+  }, [videos, downloadSingle]);
 
   return {
     videos,
@@ -144,5 +198,6 @@ export function useVideoProcessor() {
     processAll,
     retryVideo,
     downloadAll,
+    downloadSingle,
   };
 }
