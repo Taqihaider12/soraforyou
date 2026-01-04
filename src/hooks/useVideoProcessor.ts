@@ -2,7 +2,6 @@ import { useState, useCallback } from "react";
 import { VideoItem, VideoStatus } from "@/types/video";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-import { removeWatermark, downloadProcessedVideo, ProcessingProgress } from "@/lib/videoProcessor";
 
 export function useVideoProcessor() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
@@ -38,84 +37,56 @@ export function useVideoProcessor() {
   }, []);
 
   const processVideo = async (video: VideoItem) => {
-    // Step 1: Fetch video info from edge function
     updateVideo(video.id, { 
       status: "fetching", 
-      progress: 5,
-      progressMessage: "Fetching video info..." 
+      progress: 10,
+      progressMessage: "Sending to AI watermark remover..." 
     });
 
     try {
+      // Simulate progress while waiting for API
+      const progressInterval = setInterval(() => {
+        setVideos(prev => prev.map(v => {
+          if (v.id === video.id && v.status === "fetching" && v.progress < 80) {
+            return { ...v, progress: Math.min(v.progress + 5, 80) };
+          }
+          if (v.id === video.id && v.status === "processing" && v.progress < 95) {
+            return { ...v, progress: Math.min(v.progress + 2, 95) };
+          }
+          return v;
+        }));
+      }, 2000);
+
+      updateVideo(video.id, { 
+        status: "processing", 
+        progress: 30,
+        progressMessage: "AI is removing watermark..." 
+      });
+
       const { data, error } = await supabase.functions.invoke('process-sora-video', {
         body: { url: video.originalUrl }
       });
 
+      clearInterval(progressInterval);
+
       if (error) {
-        throw new Error(error.message || 'Failed to fetch video info');
+        throw new Error(error.message || 'Failed to process video');
       }
       
       if (!data.success) {
-        throw new Error(data.error || 'Failed to extract video URL');
+        throw new Error(data.error || 'Failed to remove watermark');
       }
 
-      updateVideo(video.id, { 
-        status: "processing", 
-        progress: 15,
-        progressMessage: "Video URL extracted",
-        thumbnailUrl: data.thumbnail,
-        resolution: data.resolution,
-      });
-
-      // Step 2: Process with FFmpeg to remove watermark
-      updateVideo(video.id, { 
-        status: "removing-watermark", 
-        progress: 20,
-        progressMessage: "Loading video processor..." 
-      });
-
-      const fileName = data.fileName || `sora_${data.videoId}_no_watermark.mp4`;
-
-      const processedBlob = await removeWatermark(
-        data.downloadUrl,
-        (progressInfo: ProcessingProgress) => {
-          // Map FFmpeg progress to overall progress (20-95%)
-          let overallProgress = 20;
-          switch (progressInfo.stage) {
-            case 'loading':
-              overallProgress = 20 + (progressInfo.progress * 0.1);
-              break;
-            case 'downloading':
-              overallProgress = 30 + (progressInfo.progress * 0.2);
-              break;
-            case 'processing':
-            case 'encoding':
-              overallProgress = 50 + (progressInfo.progress * 0.45);
-              break;
-            case 'complete':
-              overallProgress = 95;
-              break;
-          }
-          
-          updateVideo(video.id, { 
-            progress: Math.round(overallProgress),
-            progressMessage: progressInfo.message 
-          });
-        }
-      );
-
-      // Step 3: Complete - create blob URL for download
-      const blobUrl = URL.createObjectURL(processedBlob);
-      
       updateVideo(video.id, {
         status: "completed",
         progress: 100,
         progressMessage: "Watermark removed!",
-        fileName,
-        downloadUrl: blobUrl,
-        processedBlob,
+        fileName: data.fileName,
+        resolution: data.resolution || "1080p",
+        downloadUrl: data.downloadUrl,
       });
 
-      toast.success(`Video processed: ${fileName}`);
+      toast.success(`Video processed: ${data.fileName}`);
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to process video';
@@ -137,9 +108,9 @@ export function useVideoProcessor() {
     }
 
     setIsProcessing(true);
-    toast.info(`Processing ${pendingVideos.length} video${pendingVideos.length !== 1 ? "s" : ""}... This may take a few minutes.`);
+    toast.info(`Processing ${pendingVideos.length} video${pendingVideos.length !== 1 ? "s" : ""}... This may take 1-2 minutes per video.`);
 
-    // Process videos sequentially to avoid memory issues
+    // Process videos sequentially
     for (const video of pendingVideos) {
       await processVideo(video);
     }
@@ -159,12 +130,11 @@ export function useVideoProcessor() {
   }, [videos, updateVideo]);
 
   const downloadSingle = useCallback((video: VideoItem) => {
-    if (video.processedBlob) {
-      downloadProcessedVideo(video.processedBlob, video.fileName || 'sora_video.mp4');
-    } else if (video.downloadUrl) {
+    if (video.downloadUrl) {
       const link = document.createElement('a');
       link.href = video.downloadUrl;
-      link.download = video.fileName || 'sora_video.mp4';
+      link.download = video.fileName || 'sora_video_no_watermark.mp4';
+      link.target = '_blank';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -172,7 +142,7 @@ export function useVideoProcessor() {
   }, []);
 
   const downloadAll = useCallback(() => {
-    const completedVideos = videos.filter((v) => v.status === "completed" && (v.processedBlob || v.downloadUrl));
+    const completedVideos = videos.filter((v) => v.status === "completed" && v.downloadUrl);
     
     if (completedVideos.length === 0) {
       toast.info("No completed videos to download");

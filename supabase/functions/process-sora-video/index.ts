@@ -9,178 +9,124 @@ interface SoraVideoRequest {
   url: string;
 }
 
-interface VideoInfo {
-  videoUrl: string;
-  title: string;
-  thumbnail: string;
-  resolution: string;
-}
-
 // Extract the video ID from Sora URL
 function extractVideoId(url: string): string | null {
   const match = url.match(/\/p\/s_([a-f0-9]+)/);
   return match ? match[1] : null;
 }
 
-// Use Firecrawl to scrape the JavaScript-rendered page
-async function scrapeWithFirecrawl(url: string): Promise<VideoInfo | null> {
-  const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+// Use Kie AI to remove watermark
+async function removeWatermarkWithKieAI(soraUrl: string): Promise<{
+  success: boolean;
+  videoUrl?: string;
+  error?: string;
+}> {
+  const apiKey = Deno.env.get('KIE_AI_API_KEY');
   
   if (!apiKey) {
-    console.error('FIRECRAWL_API_KEY not configured');
-    return null;
+    console.error('KIE_AI_API_KEY not configured');
+    return { success: false, error: 'Kie AI API key not configured' };
   }
 
-  console.log(`Scraping with Firecrawl: ${url}`);
+  console.log(`Calling Kie AI to remove watermark from: ${soraUrl}`);
 
   try {
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+    // Create task with Kie AI
+    const createResponse = await fetch('https://api.kie.ai/api/v1/jobs/createTask', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        url: url,
-        formats: ['html', 'links'],
-        waitFor: 3000, // Wait for JavaScript to render
-        onlyMainContent: false,
+        model: 'sora-watermark-remover',
+        input: {
+          video_url: soraUrl,
+        },
       }),
     });
 
-    const result = await response.json();
-    console.log('Firecrawl response status:', response.status);
+    const createResult = await createResponse.json();
+    console.log('Kie AI create task response:', JSON.stringify(createResult));
 
-    if (!response.ok || !result.success) {
-      console.error('Firecrawl error:', result);
-      return null;
-    }
-
-    const data = result.data || result;
-    const html = data.html || '';
-    const links = data.links || [];
-    
-    console.log(`Got HTML length: ${html.length}, links count: ${links.length}`);
-
-    // Try to find video URL in the rendered HTML
-    let videoUrl = extractVideoUrlFromHtml(html);
-    
-    // Also check links for video URLs
-    if (!videoUrl) {
-      videoUrl = findVideoUrlInLinks(links);
-    }
-
-    // Extract metadata
-    const metadata = data.metadata || {};
-    const title = metadata.title || metadata.ogTitle || 'Sora Video';
-    const thumbnail = metadata.ogImage || '';
-
-    if (videoUrl) {
-      console.log(`Found video URL: ${videoUrl}`);
-      return {
-        videoUrl,
-        title,
-        thumbnail,
-        resolution: '1080p',
+    if (!createResponse.ok) {
+      console.error('Kie AI error:', createResult);
+      return { 
+        success: false, 
+        error: createResult.message || createResult.error || `Kie AI error: ${createResponse.status}` 
       };
     }
 
-    // If still no video URL, try to find it in the raw response
-    console.log('Searching for video patterns in content...');
-    const allContent = JSON.stringify(result);
-    videoUrl = findVideoUrlInText(allContent);
+    // Check if we have a task ID to poll
+    const taskId = createResult.data?.taskId || createResult.taskId;
     
-    if (videoUrl) {
-      console.log(`Found video URL in content: ${videoUrl}`);
-      return {
-        videoUrl,
-        title,
-        thumbnail,
-        resolution: '1080p',
-      };
+    if (!taskId) {
+      // Some APIs return the result directly
+      if (createResult.data?.output?.video_url || createResult.output?.video_url) {
+        const videoUrl = createResult.data?.output?.video_url || createResult.output?.video_url;
+        console.log('Got video URL directly:', videoUrl);
+        return { success: true, videoUrl };
+      }
+      
+      console.error('No task ID in response:', createResult);
+      return { success: false, error: 'Failed to create processing task' };
     }
 
-    console.log('Could not find video URL in Firecrawl response');
-    return null;
+    console.log(`Task created with ID: ${taskId}, polling for result...`);
+
+    // Poll for task completion (max 60 seconds)
+    const maxAttempts = 30;
+    const pollInterval = 2000; // 2 seconds
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+
+      const statusResponse = await fetch(`https://api.kie.ai/api/v1/jobs/getTask?taskId=${taskId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+      });
+
+      const statusResult = await statusResponse.json();
+      console.log(`Poll attempt ${attempt + 1}:`, JSON.stringify(statusResult));
+
+      if (!statusResponse.ok) {
+        console.error('Status check error:', statusResult);
+        continue;
+      }
+
+      const status = statusResult.data?.status || statusResult.status;
+      
+      if (status === 'completed' || status === 'success') {
+        const videoUrl = statusResult.data?.output?.video_url || 
+                        statusResult.output?.video_url ||
+                        statusResult.data?.result?.video_url ||
+                        statusResult.result?.video_url;
+        
+        if (videoUrl) {
+          console.log('Watermark removal completed:', videoUrl);
+          return { success: true, videoUrl };
+        }
+      }
+      
+      if (status === 'failed' || status === 'error') {
+        const errorMsg = statusResult.data?.error || statusResult.error || 'Processing failed';
+        console.error('Task failed:', errorMsg);
+        return { success: false, error: errorMsg };
+      }
+      
+      // Continue polling if still processing
+      console.log(`Task status: ${status}, continuing to poll...`);
+    }
+
+    return { success: false, error: 'Processing timeout - please try again' };
+
   } catch (error) {
-    console.error('Firecrawl scrape error:', error);
-    return null;
+    console.error('Kie AI error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: `Kie AI error: ${errorMessage}` };
   }
-}
-
-function extractVideoUrlFromHtml(html: string): string | null {
-  // Pattern 1: Video source tags
-  const videoSrcMatch = html.match(/<video[^>]*src=["']([^"']+)["']/i) ||
-                        html.match(/<source[^>]+src=["']([^"']+)["'][^>]*type=["']video/i);
-  if (videoSrcMatch) return cleanUrl(videoSrcMatch[1]);
-
-  // Pattern 2: og:video meta tag
-  const ogVideoMatch = html.match(/<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i) ||
-                       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:video["']/i);
-  if (ogVideoMatch) return cleanUrl(ogVideoMatch[1]);
-
-  // Pattern 3: JSON data with video URL
-  const jsonVideoMatch = html.match(/"videoUrl"\s*:\s*"([^"]+)"/i) ||
-                         html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
-                         html.match(/"src"\s*:\s*"(https?:\/\/[^"]*\.mp4[^"]*)"/i) ||
-                         html.match(/"url"\s*:\s*"(https?:\/\/[^"]*\.mp4[^"]*)"/i);
-  if (jsonVideoMatch) return cleanUrl(jsonVideoMatch[1]);
-
-  // Pattern 4: Direct MP4 URLs
-  const mp4Match = html.match(/(https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*)/i);
-  if (mp4Match) return cleanUrl(mp4Match[1]);
-
-  // Pattern 5: CDN/blob video URLs
-  const cdnMatch = html.match(/(https?:\/\/[^"'\s<>]*(?:cdn|blob|video|media)[^"'\s<>]*\.mp4[^"'\s<>]*)/i);
-  if (cdnMatch) return cleanUrl(cdnMatch[1]);
-
-  // Pattern 6: OpenAI/Sora specific CDN patterns
-  const openaiMatch = html.match(/(https?:\/\/[^"'\s<>]*openai[^"'\s<>]*\.mp4[^"'\s<>]*)/i) ||
-                      html.match(/(https?:\/\/[^"'\s<>]*sora[^"'\s<>]*\.mp4[^"'\s<>]*)/i);
-  if (openaiMatch) return cleanUrl(openaiMatch[1]);
-
-  // Pattern 7: Any video-related URLs in data attributes
-  const dataVideoMatch = html.match(/data-[^=]*=["'](https?:\/\/[^"']*\.mp4[^"']*)["']/i);
-  if (dataVideoMatch) return cleanUrl(dataVideoMatch[1]);
-
-  return null;
-}
-
-function findVideoUrlInLinks(links: string[]): string | null {
-  for (const link of links) {
-    if (link.includes('.mp4') || link.includes('video') || link.includes('media')) {
-      console.log(`Found potential video link: ${link}`);
-      return link;
-    }
-  }
-  return null;
-}
-
-function findVideoUrlInText(text: string): string | null {
-  // Look for MP4 URLs
-  const mp4Match = text.match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-  if (mp4Match) return cleanUrl(mp4Match[1]);
-
-  // Look for video CDN URLs
-  const videoMatch = text.match(/(https?:\/\/[^"'\s\\]*(?:video|media|cdn|blob)[^"'\s\\]*)/i);
-  if (videoMatch && isLikelyVideoUrl(videoMatch[1])) return cleanUrl(videoMatch[1]);
-
-  return null;
-}
-
-function isLikelyVideoUrl(url: string): boolean {
-  const lowerUrl = url.toLowerCase();
-  return lowerUrl.includes('.mp4') || 
-         lowerUrl.includes('.webm') || 
-         lowerUrl.includes('.mov') ||
-         (lowerUrl.includes('video') && !lowerUrl.includes('javascript'));
-}
-
-function cleanUrl(url: string): string {
-  return url
-    .replace(/\\u002F/g, '/')
-    .replace(/\\/g, '')
-    .replace(/&amp;/g, '&');
 }
 
 serve(async (req) => {
@@ -219,14 +165,14 @@ serve(async (req) => {
 
     console.log(`Extracted video ID: ${videoId}`);
 
-    // Use Firecrawl to scrape the JavaScript-rendered page
-    const videoInfo = await scrapeWithFirecrawl(url);
+    // Use Kie AI to remove watermark
+    const result = await removeWatermarkWithKieAI(url);
 
-    if (!videoInfo) {
+    if (!result.success || !result.videoUrl) {
       return new Response(
         JSON.stringify({ 
-          error: 'Could not extract video from URL. Sora uses advanced protection that prevents automated extraction.',
-          suggestion: 'The video may require manual download from your browser, or the page structure has changed.',
+          error: result.error || 'Failed to remove watermark',
+          suggestion: 'Please ensure the video URL is valid and try again.',
           videoId,
         }),
         { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -238,10 +184,8 @@ serve(async (req) => {
         success: true,
         videoId,
         originalUrl: url,
-        downloadUrl: videoInfo.videoUrl,
-        title: videoInfo.title,
-        thumbnail: videoInfo.thumbnail,
-        resolution: videoInfo.resolution,
+        downloadUrl: result.videoUrl,
+        resolution: '1080p',
         fileName: `sora_${videoId.slice(0, 12)}_no_watermark.mp4`,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

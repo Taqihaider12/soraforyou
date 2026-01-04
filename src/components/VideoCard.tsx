@@ -30,21 +30,15 @@ const statusConfig = {
   },
   fetching: {
     icon: Loader2,
-    label: "Fetching video...",
+    label: "Sending to AI...",
     color: "text-warning",
     bgColor: "bg-warning/10",
   },
   processing: {
-    icon: Loader2,
-    label: "Processing...",
-    color: "text-primary",
-    bgColor: "bg-primary/10",
-  },
-  "removing-watermark": {
     icon: Wand2,
     label: "Removing watermark...",
-    color: "text-accent",
-    bgColor: "bg-accent/10",
+    color: "text-primary",
+    bgColor: "bg-primary/10",
   },
   completed: {
     icon: CheckCircle2,
@@ -63,7 +57,7 @@ const statusConfig = {
 export function VideoCard({ video, onRemove, onRetry, onDownload }: VideoCardProps) {
   const config = statusConfig[video.status];
   const StatusIcon = config.icon;
-  const isLoading = video.status === "fetching" || video.status === "processing" || video.status === "removing-watermark";
+  const isLoading = video.status === "fetching" || video.status === "processing";
 
   const extractVideoId = (url: string) => {
     const match = url.match(/s_([a-f0-9]+)/);
@@ -116,7 +110,7 @@ export function VideoCard({ video, onRemove, onRetry, onDownload }: VideoCardPro
             <div className="mt-2">
               <Progress value={video.progress} className="h-1.5" />
               <span className="text-xs text-muted-foreground mt-1 block">
-                {video.progress}%
+                {video.progress}% - AI processing may take 1-2 minutes
               </span>
             </div>
           )}
