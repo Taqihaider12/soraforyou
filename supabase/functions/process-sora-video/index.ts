@@ -14,7 +14,6 @@ interface VideoInfo {
   title: string;
   thumbnail: string;
   resolution: string;
-  duration: string;
 }
 
 // Extract the video ID from Sora URL
@@ -23,177 +22,165 @@ function extractVideoId(url: string): string | null {
   return match ? match[1] : null;
 }
 
-// Fetch the Sora page to extract video metadata
-async function fetchSoraPageData(url: string): Promise<VideoInfo | null> {
+// Use Firecrawl to scrape the JavaScript-rendered page
+async function scrapeWithFirecrawl(url: string): Promise<VideoInfo | null> {
+  const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+  
+  if (!apiKey) {
+    console.error('FIRECRAWL_API_KEY not configured');
+    return null;
+  }
+
+  console.log(`Scraping with Firecrawl: ${url}`);
+
   try {
-    console.log(`Fetching Sora page: ${url}`);
-    
-    const response = await fetch(url, {
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
       },
+      body: JSON.stringify({
+        url: url,
+        formats: ['html', 'links'],
+        waitFor: 3000, // Wait for JavaScript to render
+        onlyMainContent: false,
+      }),
     });
 
-    if (!response.ok) {
-      console.error(`Failed to fetch page: ${response.status}`);
+    const result = await response.json();
+    console.log('Firecrawl response status:', response.status);
+
+    if (!response.ok || !result.success) {
+      console.error('Firecrawl error:', result);
       return null;
     }
 
-    const html = await response.text();
-    console.log(`Got HTML response, length: ${html.length}`);
-
-    // Try to extract video URL from the page
-    // Look for video sources in various patterns
+    const data = result.data || result;
+    const html = data.html || '';
+    const links = data.links || [];
     
-    // Pattern 1: Direct video URL in meta tags
-    const ogVideoMatch = html.match(/<meta[^>]+property="og:video"[^>]+content="([^"]+)"/i) ||
-                         html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:video"/i);
+    console.log(`Got HTML length: ${html.length}, links count: ${links.length}`);
+
+    // Try to find video URL in the rendered HTML
+    let videoUrl = extractVideoUrlFromHtml(html);
     
-    // Pattern 2: Video URL in script data
-    const scriptDataMatch = html.match(/"videoUrl"\s*:\s*"([^"]+)"/i) ||
-                           html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
-                           html.match(/"url"\s*:\s*"(https?:\/\/[^"]*\.mp4[^"]*)"/i);
-    
-    // Pattern 3: Video source in video tag
-    const videoSrcMatch = html.match(/<video[^>]*src="([^"]+)"/i) ||
-                          html.match(/<source[^>]+src="([^"]+)"[^>]*type="video/i);
-    
-    // Pattern 4: CDN URLs
-    const cdnMatch = html.match(/(https?:\/\/[^"'\s]+cdn[^"'\s]*\.mp4[^"'\s]*)/i) ||
-                     html.match(/(https?:\/\/[^"'\s]+videos?[^"'\s]*\.mp4[^"'\s]*)/i);
+    // Also check links for video URLs
+    if (!videoUrl) {
+      videoUrl = findVideoUrlInLinks(links);
+    }
 
-    // Pattern 5: Look for any MP4 URL
-    const mp4Match = html.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
-
-    // Pattern 6: Look for blob or stream URLs
-    const streamMatch = html.match(/(https?:\/\/[^"'\s]+\/v1\/[^"'\s]+)/i) ||
-                        html.match(/(https?:\/\/[^"'\s]+stream[^"'\s]*)/i);
-
-    let videoUrl = ogVideoMatch?.[1] || 
-                   scriptDataMatch?.[1] || 
-                   videoSrcMatch?.[1] || 
-                   cdnMatch?.[1] || 
-                   mp4Match?.[1] ||
-                   streamMatch?.[1];
-
-    // Extract thumbnail
-    const thumbnailMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i) ||
-                          html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i) ||
-                          html.match(/"thumbnail"\s*:\s*"([^"]+)"/i);
-
-    // Extract title
-    const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
-                      html.match(/<title>([^<]+)<\/title>/i);
+    // Extract metadata
+    const metadata = data.metadata || {};
+    const title = metadata.title || metadata.ogTitle || 'Sora Video';
+    const thumbnail = metadata.ogImage || '';
 
     if (videoUrl) {
-      // Clean up the URL (unescape if needed)
-      videoUrl = videoUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-      
       console.log(`Found video URL: ${videoUrl}`);
-      
       return {
         videoUrl,
-        title: titleMatch?.[1] || 'Sora Video',
-        thumbnail: thumbnailMatch?.[1] || '',
+        title,
+        thumbnail,
         resolution: '1080p',
-        duration: 'Unknown',
       };
     }
 
-    // If no direct video URL found, try to get it from API endpoint
-    console.log('No direct video URL found, attempting API extraction...');
+    // If still no video URL, try to find it in the raw response
+    console.log('Searching for video patterns in content...');
+    const allContent = JSON.stringify(result);
+    videoUrl = findVideoUrlInText(allContent);
     
-    // Look for API data in Next.js/React hydration data
-    const hydrationMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/i);
-    if (hydrationMatch) {
-      try {
-        const data = JSON.parse(hydrationMatch[1]);
-        console.log('Found Next.js data');
-        // Navigate the data structure to find video URL
-        const findVideoUrl = (obj: any): string | null => {
-          if (!obj || typeof obj !== 'object') return null;
-          if (obj.videoUrl) return obj.videoUrl;
-          if (obj.video_url) return obj.video_url;
-          if (obj.url && typeof obj.url === 'string' && obj.url.includes('mp4')) return obj.url;
-          for (const key of Object.keys(obj)) {
-            const result = findVideoUrl(obj[key]);
-            if (result) return result;
-          }
-          return null;
-        };
-        const foundUrl = findVideoUrl(data);
-        if (foundUrl) {
-          return {
-            videoUrl: foundUrl,
-            title: titleMatch?.[1] || 'Sora Video',
-            thumbnail: thumbnailMatch?.[1] || '',
-            resolution: '1080p',
-            duration: 'Unknown',
-          };
-        }
-      } catch (e) {
-        console.error('Failed to parse hydration data:', e);
-      }
+    if (videoUrl) {
+      console.log(`Found video URL in content: ${videoUrl}`);
+      return {
+        videoUrl,
+        title,
+        thumbnail,
+        resolution: '1080p',
+      };
     }
 
-    console.log('Could not find video URL in page');
+    console.log('Could not find video URL in Firecrawl response');
     return null;
   } catch (error) {
-    console.error(`Error fetching Sora page:`, error);
+    console.error('Firecrawl scrape error:', error);
     return null;
   }
 }
 
-// Alternative approach: Use a video extraction API pattern
-async function fetchVideoViaApi(url: string): Promise<VideoInfo | null> {
-  const videoId = extractVideoId(url);
-  if (!videoId) {
-    console.error('Could not extract video ID from URL');
-    return null;
-  }
+function extractVideoUrlFromHtml(html: string): string | null {
+  // Pattern 1: Video source tags
+  const videoSrcMatch = html.match(/<video[^>]*src=["']([^"']+)["']/i) ||
+                        html.match(/<source[^>]+src=["']([^"']+)["'][^>]*type=["']video/i);
+  if (videoSrcMatch) return cleanUrl(videoSrcMatch[1]);
 
-  console.log(`Extracted video ID: ${videoId}`);
+  // Pattern 2: og:video meta tag
+  const ogVideoMatch = html.match(/<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i) ||
+                       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:video["']/i);
+  if (ogVideoMatch) return cleanUrl(ogVideoMatch[1]);
 
-  // Try various API endpoints that might provide the video
-  const apiPatterns = [
-    `https://sora.chatgpt.com/api/v1/video/${videoId}`,
-    `https://sora.chatgpt.com/api/video/${videoId}`,
-    `https://sora.chatgpt.com/p/s_${videoId}/video`,
-  ];
+  // Pattern 3: JSON data with video URL
+  const jsonVideoMatch = html.match(/"videoUrl"\s*:\s*"([^"]+)"/i) ||
+                         html.match(/"video_url"\s*:\s*"([^"]+)"/i) ||
+                         html.match(/"src"\s*:\s*"(https?:\/\/[^"]*\.mp4[^"]*)"/i) ||
+                         html.match(/"url"\s*:\s*"(https?:\/\/[^"]*\.mp4[^"]*)"/i);
+  if (jsonVideoMatch) return cleanUrl(jsonVideoMatch[1]);
 
-  for (const apiUrl of apiPatterns) {
-    try {
-      console.log(`Trying API: ${apiUrl}`);
-      const response = await fetch(apiUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json, */*',
-          'Referer': url,
-        },
-      });
+  // Pattern 4: Direct MP4 URLs
+  const mp4Match = html.match(/(https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*)/i);
+  if (mp4Match) return cleanUrl(mp4Match[1]);
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.videoUrl || data.url || data.video_url) {
-          return {
-            videoUrl: data.videoUrl || data.url || data.video_url,
-            title: data.title || 'Sora Video',
-            thumbnail: data.thumbnail || '',
-            resolution: data.resolution || '1080p',
-            duration: data.duration || 'Unknown',
-          };
-        }
-      }
-    } catch (e) {
-      console.log(`API ${apiUrl} failed:`, e);
-    }
-  }
+  // Pattern 5: CDN/blob video URLs
+  const cdnMatch = html.match(/(https?:\/\/[^"'\s<>]*(?:cdn|blob|video|media)[^"'\s<>]*\.mp4[^"'\s<>]*)/i);
+  if (cdnMatch) return cleanUrl(cdnMatch[1]);
+
+  // Pattern 6: OpenAI/Sora specific CDN patterns
+  const openaiMatch = html.match(/(https?:\/\/[^"'\s<>]*openai[^"'\s<>]*\.mp4[^"'\s<>]*)/i) ||
+                      html.match(/(https?:\/\/[^"'\s<>]*sora[^"'\s<>]*\.mp4[^"'\s<>]*)/i);
+  if (openaiMatch) return cleanUrl(openaiMatch[1]);
+
+  // Pattern 7: Any video-related URLs in data attributes
+  const dataVideoMatch = html.match(/data-[^=]*=["'](https?:\/\/[^"']*\.mp4[^"']*)["']/i);
+  if (dataVideoMatch) return cleanUrl(dataVideoMatch[1]);
 
   return null;
+}
+
+function findVideoUrlInLinks(links: string[]): string | null {
+  for (const link of links) {
+    if (link.includes('.mp4') || link.includes('video') || link.includes('media')) {
+      console.log(`Found potential video link: ${link}`);
+      return link;
+    }
+  }
+  return null;
+}
+
+function findVideoUrlInText(text: string): string | null {
+  // Look for MP4 URLs
+  const mp4Match = text.match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+  if (mp4Match) return cleanUrl(mp4Match[1]);
+
+  // Look for video CDN URLs
+  const videoMatch = text.match(/(https?:\/\/[^"'\s\\]*(?:video|media|cdn|blob)[^"'\s\\]*)/i);
+  if (videoMatch && isLikelyVideoUrl(videoMatch[1])) return cleanUrl(videoMatch[1]);
+
+  return null;
+}
+
+function isLikelyVideoUrl(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+  return lowerUrl.includes('.mp4') || 
+         lowerUrl.includes('.webm') || 
+         lowerUrl.includes('.mov') ||
+         (lowerUrl.includes('video') && !lowerUrl.includes('javascript'));
+}
+
+function cleanUrl(url: string): string {
+  return url
+    .replace(/\\u002F/g, '/')
+    .replace(/\\/g, '')
+    .replace(/&amp;/g, '&');
 }
 
 serve(async (req) => {
@@ -222,25 +209,29 @@ serve(async (req) => {
       );
     }
 
-    // Try to fetch video info from the page
-    let videoInfo = await fetchSoraPageData(url);
-    
-    // If that fails, try the API approach
-    if (!videoInfo) {
-      videoInfo = await fetchVideoViaApi(url);
+    const videoId = extractVideoId(url);
+    if (!videoId) {
+      return new Response(
+        JSON.stringify({ error: 'Could not extract video ID from URL' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
+
+    console.log(`Extracted video ID: ${videoId}`);
+
+    // Use Firecrawl to scrape the JavaScript-rendered page
+    const videoInfo = await scrapeWithFirecrawl(url);
 
     if (!videoInfo) {
       return new Response(
         JSON.stringify({ 
-          error: 'Could not extract video from URL. The video may be private or the URL format has changed.',
-          suggestion: 'Please ensure the video is publicly accessible and try again.'
+          error: 'Could not extract video from URL. Sora uses advanced protection that prevents automated extraction.',
+          suggestion: 'The video may require manual download from your browser, or the page structure has changed.',
+          videoId,
         }),
         { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
-
-    const videoId = extractVideoId(url) || 'unknown';
 
     return new Response(
       JSON.stringify({
