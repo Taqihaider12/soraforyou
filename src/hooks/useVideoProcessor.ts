@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { VideoItem, VideoStatus } from "@/types/video";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 export function useVideoProcessor() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
@@ -40,35 +41,43 @@ export function useVideoProcessor() {
     updateVideo(video.id, { status: "fetching", progress: 10 });
 
     try {
-      // Simulate fetching video info
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Call edge function to fetch video info
       updateVideo(video.id, { progress: 30 });
+      
+      const { data, error } = await supabase.functions.invoke('process-sora-video', {
+        body: { url: video.originalUrl }
+      });
 
-      // Simulate processing
+      if (error) {
+        throw new Error(error.message || 'Failed to process video');
+      }
+
       updateVideo(video.id, { status: "processing", progress: 50 });
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to extract video');
+      }
+
       updateVideo(video.id, { progress: 70 });
 
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Small delay for UX
+      await new Promise((resolve) => setTimeout(resolve, 500));
       updateVideo(video.id, { progress: 90 });
 
-      // Extract video ID for filename
-      const match = video.originalUrl.match(/s_([a-f0-9]+)/);
-      const videoId = match ? match[1].slice(0, 12) : "video";
-
-      // Complete - in real implementation, this would have the actual download URL
+      // Complete with actual download URL from edge function
       updateVideo(video.id, {
         status: "completed",
         progress: 100,
-        fileName: `sora_${videoId}_no_watermark.mp4`,
-        resolution: "1080p",
-        // In production, this would be the actual processed video URL
-        downloadUrl: video.originalUrl,
+        fileName: data.fileName || `sora_${data.videoId}_no_watermark.mp4`,
+        resolution: data.resolution || "1080p",
+        downloadUrl: data.downloadUrl,
+        thumbnailUrl: data.thumbnail,
       });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to process video';
       updateVideo(video.id, {
         status: "error",
-        error: "Failed to process video. Please try again.",
+        error: errorMessage,
       });
     }
   };
