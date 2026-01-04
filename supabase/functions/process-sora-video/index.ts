@@ -81,7 +81,7 @@ async function removeWatermarkWithKieAI(soraUrl: string): Promise<{
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
 
-      const statusResponse = await fetch(`https://api.kie.ai/api/v1/jobs/getTask?taskId=${taskId}`, {
+      const statusResponse = await fetch(`https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${taskId}`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -91,18 +91,28 @@ async function removeWatermarkWithKieAI(soraUrl: string): Promise<{
       const statusResult = await statusResponse.json();
       console.log(`Poll attempt ${attempt + 1}:`, JSON.stringify(statusResult));
 
-      if (!statusResponse.ok) {
+      if (!statusResponse.ok || statusResult.code !== 200) {
         console.error('Status check error:', statusResult);
         continue;
       }
 
-      const status = statusResult.data?.status || statusResult.status;
+      const state = statusResult.data?.state;
       
-      if (status === 'completed' || status === 'success') {
-        const videoUrl = statusResult.data?.output?.video_url || 
-                        statusResult.output?.video_url ||
-                        statusResult.data?.result?.video_url ||
-                        statusResult.result?.video_url;
+      if (state === 'success') {
+        // Parse resultJson which contains the URLs
+        let videoUrl = null;
+        try {
+          const resultData = JSON.parse(statusResult.data?.resultJson || '{}');
+          videoUrl = resultData.resultUrls?.[0] || resultData.video_url;
+        } catch (e) {
+          console.log('Could not parse resultJson, checking other fields');
+        }
+        
+        // Fallback to other possible locations
+        if (!videoUrl) {
+          videoUrl = statusResult.data?.output?.video_url || 
+                    statusResult.data?.result?.video_url;
+        }
         
         if (videoUrl) {
           console.log('Watermark removal completed:', videoUrl);
@@ -110,14 +120,14 @@ async function removeWatermarkWithKieAI(soraUrl: string): Promise<{
         }
       }
       
-      if (status === 'failed' || status === 'error') {
-        const errorMsg = statusResult.data?.error || statusResult.error || 'Processing failed';
+      if (state === 'failed' || state === 'error') {
+        const errorMsg = statusResult.data?.failMsg || statusResult.data?.error || 'Processing failed';
         console.error('Task failed:', errorMsg);
         return { success: false, error: errorMsg };
       }
       
-      // Continue polling if still processing
-      console.log(`Task status: ${status}, continuing to poll...`);
+      // Continue polling if still processing (state = 'pending' or 'processing')
+      console.log(`Task state: ${state}, continuing to poll...`);
     }
 
     return { success: false, error: 'Processing timeout - please try again' };
